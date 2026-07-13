@@ -1,2 +1,4 @@
 fog-edge-env/
 __pycache__/
+.env
+*.json

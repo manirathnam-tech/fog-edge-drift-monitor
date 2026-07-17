@@ -1,55 +1,104 @@
-import streamlit as st
+import os
 import requests
-import pandas as pd
+import streamlit as st
+from kubernetes import client, config
+from dotenv import load_dotenv
 
-# Set the page configuration
-st.set_page_config(page_title="Edge-AI Monitor", layout="wide")
+# load env vars
+load_dotenv()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")
 
-st.title("🌐 Cloud Command Center: Infrastructure Monitor")
-st.markdown("Real-time telemetry and AI remediation from distributed Fog Nodes.")
+# page config
+st.set_page_config(page_title="Edge-AI Drift Monitor", layout="wide")
+
+st.title("Edge-AI Infrastructure Configuration Drift Monitor")
+st.subheader("Fog and Edge Computing Project | Live Telemetry & Remediation")
 st.markdown("---")
 
-# Function to pull data from our local Cloud Backend
-def fetch_alerts():
+# project overview
+with st.expander("Executive Summary & Architecture", expanded=False):
+    st.markdown("""
+    **Executive Summary**
+    This project demonstrates an end-to-end cloud-native telemetry pipeline designed to automatically detect configuration drift within containerized environments (Kubernetes) and leverage a localized Large Language Model (LLM) to evaluate anomalies and generate precise, deterministic remediation scripts.
+
+    **Core System Objectives**
+    * **Continuous Monitoring:** Custom Python-based edge sensors monitor the operational state of container infrastructure against a declarative GitOps source of truth.
+    * **Edge-AI Decision Engine:** A FastAPI gateway intercepts telemetry anomalies, formats structural context, and prompts an edge LLM (Phi-3) to analyze infrastructure drift.
+    * **Reliability Evaluation:** The system acts as a live evaluation framework for assessing whether a generative AI model can output flawless, syntax-accurate CLI commands (kubectl) under tight resource constraints.
+    * **Cloud Visualization:** Enriched payloads containing metrics, drift reasoning, and AI-generated remediation playbooks are shipped to a scalable backend queue and visualized live on an enterprise monitoring dashboard.
+    """)
+st.markdown("---")
+
+# k8s client setup
+@st.cache_resource(ttl=10)
+def get_k8s_client():
     try:
-        response = requests.get("http://localhost:9000/cloud/alerts")
-        if response.status_code == 200:
-            return response.json().get("active_alerts", [])
-    except requests.exceptions.ConnectionError:
-        st.warning("⚠️ Cannot connect to Cloud Backend. Is it running?")
+        config.load_kube_config(config_file=os.path.expanduser("~/.kube/aws-cloud-config"))
+        return client.AppsV1Api()
+    except Exception:
+        return None
+
+# retrieve recent issues
+@st.cache_data(ttl=10)
+def get_recent_interventions():
+    if not GITHUB_TOKEN or not GITHUB_REPO:
         return []
+    
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/issues?state=all&labels=drift-alert"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json()[:5]
+    except Exception:
+        pass
     return []
 
-# Fetch the data
-alerts = fetch_alerts()
+col1, col2 = st.columns([1, 1])
 
-# Dashboard Layout
-col1, col2 = st.columns([2, 1])
-
+# cluster status section
 with col1:
-    st.subheader("🚨 Active Configuration Drift Alerts")
+    st.header("AWS Cluster Status")
+    k8s_api = get_k8s_client()
     
-    if not alerts:
-        st.success("✅ Infrastructure is completely healthy. No drift detected.")
+    if k8s_api:
+        try:
+            deployment = k8s_api.read_namespaced_deployment(name="nginx-baseline", namespace="default")
+            
+            # evaluate against GitOps declarative baseline, not the tampered state
+            expected = 3 
+            actual = deployment.status.ready_replicas or 0
+            
+            if expected == actual:
+                st.success("Infrastructure Healthy: No Configuration Drift")
+                st.metric(label="Nginx Replicas", value=actual, delta="0 Drift")
+            else:
+                st.error("ACTIVE DRIFT DETECTED")
+                st.metric(label="Nginx Replicas", value=actual, delta=f"{actual - expected} Pods (Drift)", delta_color="inverse")
+                
+            st.info(f"Target Image: {deployment.spec.template.spec.containers[0].image}")
+            
+        except Exception:
+            st.warning("Awaiting deployment target 'nginx-baseline' initialization.")
     else:
-        st.error(f"{len(alerts)} Anomalies Detected in the Cloud Queue!")
-        
-        # Loop through the alerts (reversed so the newest is at the top)
-        for idx, alert in enumerate(reversed(alerts)):
-            with st.expander(f"Drift Detected: {alert.get('target', 'Unknown')} (Click to expand)", expanded=True):
-                
-                st.write("**Anomalies Flagged by Edge Sensor:**")
-                for reason in alert.get("reasons", []):
-                    st.code(reason, language="bash")
-                
-                st.write("**🤖 Edge-AI Autonomous Remediation Plan:**")
-                st.info(alert.get("remediation_plan", "No plan provided."))
+        st.error("Connection failed. Verify kubeconfig.")
 
+# remediation log section
 with col2:
-    st.subheader("System Status")
-    st.metric(label="Fog Nodes Online", value="1 Active")
-    st.metric(label="Cloud Queue Status", value="Healthy")
+    st.header("Remediation Log")
+    issues = get_recent_interventions()
     
-    # A simple refresh button to pull new data
-    if st.button("🔄 Refresh Telemetry Data"):
-        st.rerun()
+    if issues:
+        for issue in issues:
+            status_color = "[CLOSED]" if issue['state'] == "closed" else "[OPEN]"
+            with st.expander(f"{status_color} {issue['title']} (Issue #{issue['number']})", expanded=(issue['state'] == "open")):
+                st.markdown(issue['body'])
+                st.markdown(f"[View Execution in GitHub]({issue['html_url']})")
+    else:
+        st.info("No recent interventions logged.")
+
+st.markdown("---")
+if st.button("Poll Latest Telemetry"):
+    st.rerun()

@@ -1,57 +1,29 @@
-import json
 import os
-import time
+import json
+import boto3
+from dotenv import load_dotenv
 
-QUEUE_FILE = "local_message_queue.json"
+# load environment variables
+load_dotenv()
+SQS_QUEUE_URL = os.getenv("AWS_SQS_QUEUE_URL")
 
-def push_to_queue(payload):
-    """Adds a new message payload to our local persistent queue."""
-    messages = []
-    if os.path.exists(QUEUE_FILE):
-        with open(QUEUE_FILE, "r") as f:
-            try:
-                messages = json.load(f)
-            except json.JSONDecodeError:
-                messages = []
-                
-    payload["timestamp"] = time.time()
-    payload["status"] = "pending"
-    messages.append(payload)
+# initialize sqs client
+sqs = boto3.client('sqs', region_name='us-east-1')
+
+def enqueue_remediation_task(target_deployment, issue_title, issue_body):
+    payload = {
+        "target": target_deployment,
+        "title": issue_title,
+        "body": issue_body
+    }
     
-    with open(QUEUE_FILE, "w") as f:
-        json.dump(messages, f, indent=4)
-    print(f"[QUEUE] Successfully enqueued task for target: {payload.get('target')}")
-
-def pop_from_queue():
-    """Retrieves and removes the oldest pending message from the queue."""
-    if not os.path.exists(QUEUE_FILE):
-        return None
-        
-    with open(QUEUE_FILE, "r") as f:
-        try:
-            messages = json.load(f)
-        except json.JSONDecodeError:
-            return None
-            
-    for msg in messages:
-        if msg["status"] == "pending":
-            msg["status"] = "processing"
-            # Save state
-            with open(QUEUE_FILE, "w") as f:
-                json.dump(messages, f, indent=4)
-            return msg
-            
-    return None
-
-def clear_resolved_messages():
-    """Removes processed messages from the queue store."""
-    if os.path.exists(QUEUE_FILE):
-        with open(QUEUE_FILE, "r") as f:
-            try:
-                messages = json.load(f)
-            except json.JSONDecodeError:
-                return
-        # Keep only pending or stuck messages for safety, or clear out completed
-        remain = [m for m in messages if m["status"] == "pending"]
-        with open(QUEUE_FILE, "w") as f:
-            json.dump(remain, f, indent=4)
+    try:
+        response = sqs.send_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MessageBody=json.dumps(payload)
+        )
+        print(f"[SQS] Successfully enqueued task for target: {target_deployment}. Message ID: {response['MessageId']}")
+        return True
+    except Exception as e:
+        print(f"[SQS ERROR] Failed to enqueue task: {str(e)}")
+        return False

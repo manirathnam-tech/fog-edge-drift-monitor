@@ -1,0 +1,21 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: fog-edge-cloud-cluster
+  region: eu-west-1
+  version: "1.29"
+
+managedNodeGroups:
+  - name: edge-worker-nodes
+    instanceType: t3.medium
+    minSize: 2
+    maxSize: 3
+    desiredCapacity: 2
+    volumeSize: 20
+    spot: true
+    ssh:
+      allow: true
+    tags:
+      project: "fog-edge-thesis"
+      environment: "production"

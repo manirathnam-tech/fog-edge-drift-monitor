@@ -1,72 +1,72 @@
-import time
-import requests
 import os
+import time
 import json
-from queue_manager import pop_from_queue, QUEUE_FILE
+import boto3
+import requests
 from dotenv import load_dotenv
 
+# load environment configurations
 load_dotenv()
+SQS_QUEUE_URL = os.getenv("AWS_SQS_QUEUE_URL")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "")
+# initialize sqs client
+sqs = boto3.client('sqs', region_name='us-east-1')
 
-def create_github_issue(target, reasons, remediation_plan):
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        print("[WARN] GitHub credentials missing. Skipping issue creation.")
-        return False
-        
+def create_github_issue(title, body):
     url = f"https://api.github.com/repos/{GITHUB_REPO}/issues"
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
-    
-    title = f"[Alert] Configuration Drift: {target}"
-    body = (
-        f"**Target Deployment:** `{target}`\n\n"
-        f"**Issues Detected:**\n" + "".join([f"- {r}\n" for r in reasons]) + "\n"
-        f"**Suggested Remediation:**\n"
-        f"```bash\n{remediation_plan}\n```\n"
-    )
-    
-    payload = {"title": title, "body": body, "labels": ["bug", "drift-alert"]}
+    payload = {"title": title, "body": body, "labels": ["drift-alert"]}
     
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 201:
-            print(f"[SUCCESS] Issue created: {response.json().get('html_url')}")
+            print(f"[SUCCESS] Issue created: {response.json()['html_url']}")
             return True
-        else:
-            print(f"[ERROR] API request failed with status: {response.status_code}")
-            return False
+        print(f"[ERROR] Failed to create issue. Status: {response.status_code}")
+        return False
     except Exception as e:
-        print(f"[ERROR] Network exception: {e}")
+        print(f"[ERROR] GitHub API request failed: {str(e)}")
         return False
 
-def start_worker_loop():
-    print("Starting worker loop. Polling queue...")
+def poll_sqs():
+    print("Starting SQS worker loop. Long-polling AWS SQS queue...")
     while True:
-        job = pop_from_queue()
-        if job:
-            print(f"\n[INFO] Processing task for target: {job['target']}")
-            
-            create_github_issue(job['target'], job['reasons'], job['remediation_plan'])
-            
-            if os.path.exists(QUEUE_FILE):
-                with open(QUEUE_FILE, "r") as f:
-                    messages = json.load(f)
+        try:
+            # poll for messages with a 10-second wait time to reduce api calls
+            response = sqs.receive_message(
+                QueueUrl=SQS_QUEUE_URL,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=10
+            )
+
+            messages = response.get('Messages', [])
+            if not messages:
+                continue
+
+            for message in messages:
+                receipt_handle = message['ReceiptHandle']
+                body = json.loads(message['Body'])
                 
-                messages = [m for m in messages if not (m['target'] == job['target'] and m['timestamp'] == job['timestamp'])]
+                print(f"\n[INFO] Processing SQS task for target: {body['target']}")
                 
-                with open(QUEUE_FILE, "w") as f:
-                    json.dump(messages, f, indent=4)
+                success = create_github_issue(body['title'], body['body'])
+                
+                if success:
+                    # delete message from queue after successful processing
+                    sqs.delete_message(
+                        QueueUrl=SQS_QUEUE_URL,
+                        ReceiptHandle=receipt_handle
+                    )
+                    print("[INFO] Task complete. Message securely purged from SQS queue.")
                     
-            print(f"[INFO] Task complete. Returning to poll state.")
-        
-        time.sleep(2)
+        except Exception as e:
+            print(f"[ERROR] SQS polling failed: {str(e)}")
+            time.sleep(5)
 
 if __name__ == "__main__":
-    try:
-        start_worker_loop()
-    except KeyboardInterrupt:
-        print("\nWorker shutting down.")
+    poll_sqs()

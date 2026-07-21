@@ -2,3 +2,6 @@ fog-edge-env/
 __pycache__/
 .env
 *.json
+vockey.pem
+local_message_queue.json
+__pycache__/
